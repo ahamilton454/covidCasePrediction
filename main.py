@@ -1,5 +1,5 @@
 from load_data import load_data
-from helpers import convert_to_tensor, define_model, normalize_by_column
+from helpers import convert_to_tensor, define_model, write_predictions, deep_interpolate_data
 import pandas as pd
 import numpy as np
 import torch
@@ -8,7 +8,16 @@ import torch.optim as optim
 import matplotlib.pyplot as plt
 import optuna
 from optuna.trial import TrialState
+import enum
 import csv
+
+
+
+class Model(enum.Enum):
+    OptunaNN = 1
+    NN = 2
+    RidgeRegression = 3
+    Visualize = 4
 
 DEVICE = torch.device("cpu")
 FEATURE_COLMNS = ["Region", "Population", "Area", "Pop. Density", "Coastline", "Net migration",
@@ -16,11 +25,9 @@ FEATURE_COLMNS = ["Region", "Population", "Area", "Pop. Density", "Coastline", "
                                     "Birthrate", "Deathrate", "Agriculture", "Industry", "Service",
                                     "Handwashing Facilities", "Extreme poverty", "Median age", "Life expectancy",
                                     "Human development index"]
-TUNING = -1
+TUNING = Model.NN
 
 x_train, y_train, x_val, y_val, x_test = load_data()
-
-
 
 
 def objective(trial):
@@ -86,7 +93,7 @@ def objective(trial):
 
 
 
-if TUNING == True:
+if TUNING == Model.OptunaNN:
     if __name__ == "__main__":
         study = optuna.create_study(direction="minimize")
         study.optimize(objective, n_trials=50, timeout=1000)
@@ -107,9 +114,9 @@ if TUNING == True:
         print("  Params: ")
         for key, value in trial.params.items():
             print("    {}: {}".format(key, value))
-elif TUNING == False:
+elif TUNING == Model.NN:
 
-    drops = ["Pop. Density", "Area", "Phones"]
+    drops = []
     # Train Set
     inputs = convert_to_tensor(x_train, drop=drops)
     targets = torch.from_numpy(y_train)
@@ -123,14 +130,14 @@ elif TUNING == False:
 
     model = define_model(inputs.shape[1]).to(DEVICE)
 
-    lr = 0.03
-    optimizer = getattr(optim, "SGD")(model.parameters(), lr=lr)
+    lr = 0.003
+    optimizer = getattr(optim, "Adam")(model.parameters(), lr=lr)
     mse = nn.MSELoss()
 
     # train model
     loss_list = []
     val_loss_list = []
-    iteration_number = 500
+    iteration_number = 600
 
     for iteration in range(iteration_number):
         # optimization
@@ -159,12 +166,7 @@ elif TUNING == False:
     print("Training Loss: {}".format(loss_list[-1]))
     print("Validation Loss: {}".format(val_loss_list[-1]))
 
-    with open('predictions.csv', "wt") as fp:
-        writer = csv.writer(fp, delimiter=",")
-        writer.writerow(["id", "cases"])
-
-        for count, result in enumerate(test_results):
-            writer.writerow([str(count), result.item()])
+    write_predictions(test_results)
 
     fig, axes = plt.subplots(nrows=1, ncols=2, figsize=(5, 3))
     axes[0].plot(range(iteration_number), loss_list)
@@ -172,24 +174,50 @@ elif TUNING == False:
     fig.tight_layout()
     plt.show()
 
-else:
+elif TUNING == Model.RidgeRegression:
     from ridge_regression import RidgeModel
     from sklearn.metrics import mean_squared_error
 
+    x = deep_interpolate_data(x_train)
     # Train Set
-    inputs = convert_to_tensor(x_train)
+    inputs = convert_to_tensor(deep_interpolate_data(x_train), file_name="x_train.csv")
     targets = torch.from_numpy(y_train)
 
     # Val Set
-    torch_val_x = convert_to_tensor(x_val)
+    torch_val_x = convert_to_tensor(deep_interpolate_data(x_val), file_name="x_val.csv")
     torch_val_y = torch.from_numpy(y_val)
 
     # Test Set
-    np_test_x = convert_to_tensor(x_test)
+    np_test_x = convert_to_tensor(x_test, file_name="x_test.csv")
 
-    ridge = RidgeModel(alpha=0.1)
+    ridge = RidgeModel(alpha=1)
 
     ridge.fit(inputs, targets)
 
     print("Ridge Regression Training Loss: ", mean_squared_error(ridge.predict(inputs), targets))
     print("Ridge Regression Validation Loss: ", mean_squared_error(ridge.predict(torch_val_x), torch_val_y))
+elif TUNING == Model.Visualize:
+
+    def remove_none(arr):
+        for i in range(0, len(arr)):
+            for j in range(0, len(arr[0])):
+                if arr[i, j] == None:
+                    arr[i, j] = 0
+
+        return arr
+
+    arr_train = remove_none(np.array(x_train))
+    arr_val = remove_none(np.array(x_val))
+
+    fig, axes = plt.subplots(nrows=4, ncols=7)
+    fig.tight_layout()
+    for index, i in enumerate(FEATURE_COLMNS):
+        plt.subplot(4, 7, index+1)
+        plt.hist(arr_train[:, index], density=True, bins=10)  # density=False would make counts
+        plt.hist(arr_val[:, index], density=True, bins=10)  # density=False would make counts
+        plt.xlabel(i)
+
+    plt.show()
+
+
+

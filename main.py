@@ -1,4 +1,5 @@
 from load_data import load_data
+from helpers import convert_to_tensor, define_model, normalize_by_column
 import pandas as pd
 import numpy as np
 import torch
@@ -10,44 +11,40 @@ from optuna.trial import TrialState
 import csv
 
 DEVICE = torch.device("cpu")
-EPOCHS = 10
-
-x_train, y_train, x_val, y_val, x_test = load_data()
-
-def convert_to_labeled_df(arr):
-    return pd.DataFrame(arr, columns=["Region", "Population", "Area", "Pop. Density", "Coastline", "Net migration",
+FEATURE_COLMNS = ["Region", "Population", "Area", "Pop. Density", "Coastline", "Net migration",
                                     "Infant mortality", "GDP", "Literacy", "Phones", "Arable", "Crops", "Other",
                                     "Birthrate", "Deathrate", "Agriculture", "Industry", "Service",
                                     "Handwashing Facilities", "Extreme poverty", "Median age", "Life expectancy",
-                                    "Human development index"])
+                                    "Human development index"]
+TUNING = -1
 
-dfx = convert_to_labeled_df(x_train).drop(columns=["Handwashing Facilities", "Extreme poverty"]).fillna(0)
-dfxv = convert_to_labeled_df(x_val).drop(columns=["Handwashing Facilities", "Extreme poverty"]).fillna(0)
-dfxt = convert_to_labeled_df(x_test).drop(columns=["Handwashing Facilities", "Extreme poverty"]).fillna(0)
+x_train, y_train, x_val, y_val, x_test = load_data()
 
-def normalize_by_column(array):
-    x = np.array(array, dtype=np.float32)
-    norm_array = x / x.max(axis=0)
-    return norm_array
 
-# Train Set
-inputs = torch.from_numpy(normalize_by_column(dfx.values))
-targets = torch.from_numpy(y_train)
 
-# Val Set
-np_val_x = torch.from_numpy(normalize_by_column(dfxv.values))
-np_val_y = torch.from_numpy(y_val)
-
-# Test Set
-np_test_x = torch.from_numpy((normalize_by_column(dfxt.values)))
-
-def define_model():
-    layers = [nn.Linear(21, 1)]
-
-    return nn.Sequential(*layers)
 
 def objective(trial):
-    model = define_model().to(DEVICE)
+
+    num_cols_drop = trial.suggest_int("num dropped columns", 0, 3)
+
+    ftcols = FEATURE_COLMNS
+    drops = []
+    for num in range(0, num_cols_drop):
+        suggestion = trial.suggest_categorical("drop {}".format(num), ftcols)
+        # ftcols.remove(suggestion)
+        drops.append(suggestion)
+
+
+    # Train Set
+    inputs = convert_to_tensor(x_train, drop=drops)
+    targets = torch.from_numpy(y_train)
+
+    # Val Set
+    torch_val_x = convert_to_tensor(x_val, drop=drops)
+    torch_val_y = torch.from_numpy(y_val)
+
+
+    model = define_model(num_features=inputs.shape[1]).to(DEVICE)
 
     optimizer_name = trial.suggest_categorical("optimizer", ["Adam", "RMSprop", "SGD"])
     lr = trial.suggest_float("lr", 1e-5, 1e-1, log=True)
@@ -78,8 +75,8 @@ def objective(trial):
         # store loss
         loss_list.append(loss.data)
 
-        val_results = model.forward(np_val_x)
-        val_loss = mse(val_results.squeeze(), np_val_y).data
+        val_results = model.forward(torch_val_x)
+        val_loss = mse(val_results.squeeze(), torch_val_y).data
         val_loss_list.append(val_loss)
 
         trial.report(val_loss, iteration_number)
@@ -89,77 +86,110 @@ def objective(trial):
 
 
 
+if TUNING == True:
+    if __name__ == "__main__":
+        study = optuna.create_study(direction="minimize")
+        study.optimize(objective, n_trials=50, timeout=1000)
 
-# if __name__ == "__main__":
-#     study = optuna.create_study(direction="minimize")
-#     study.optimize(objective, n_trials=100, timeout=600)
-#
-#     pruned_trials = study.get_trials(deepcopy=False, states=[TrialState.PRUNED])
-#     complete_trials = study.get_trials(deepcopy=False, states=[TrialState.COMPLETE])
-#
-#     print("Study statistics: ")
-#     print("  Number of finished trials: ", len(study.trials))
-#     print("  Number of pruned trials: ", len(pruned_trials))
-#     print("  Number of complete trials: ", len(complete_trials))
-#
-#     print("Best trial:")
-#     trial = study.best_trial
-#
-#     print("  Value: ", trial.value)
-#
-#     print("  Params: ")
-#     for key, value in trial.params.items():
-#         print("    {}: {}".format(key, value))
+        pruned_trials = study.get_trials(deepcopy=False, states=[TrialState.PRUNED])
+        complete_trials = study.get_trials(deepcopy=False, states=[TrialState.COMPLETE])
 
+        print("Study statistics: ")
+        print("  Number of finished trials: ", len(study.trials))
+        print("  Number of pruned trials: ", len(pruned_trials))
+        print("  Number of complete trials: ", len(complete_trials))
 
+        print("Best trial:")
+        trial = study.best_trial
 
+        print("  Value: ", trial.value)
 
+        print("  Params: ")
+        for key, value in trial.params.items():
+            print("    {}: {}".format(key, value))
+elif TUNING == False:
 
-model = define_model().to(DEVICE)
+    drops = ["Pop. Density", "Area", "Phones"]
+    # Train Set
+    inputs = convert_to_tensor(x_train, drop=drops)
+    targets = torch.from_numpy(y_train)
 
-lr = 0.005
-optimizer = getattr(optim, "RMSprop")(model.parameters(), lr=lr)
-mse = nn.MSELoss()
+    # Val Set
+    torch_val_x = convert_to_tensor(x_val, drop=drops)
+    torch_val_y = torch.from_numpy(y_val)
 
-# train model
-loss_list = []
-val_loss_list = []
-iteration_number = 800
+    # Test Set
+    np_test_x = convert_to_tensor(x_test, drop=drops)
 
-for iteration in range(iteration_number):
-    # optimization
-    optimizer.zero_grad()
+    model = define_model(inputs.shape[1]).to(DEVICE)
 
-    # Forward to get output
-    results = model.forward(inputs)
+    lr = 0.03
+    optimizer = getattr(optim, "SGD")(model.parameters(), lr=lr)
+    mse = nn.MSELoss()
 
-    # Calculate Loss
-    loss = mse(results.squeeze(), targets)
+    # train model
+    loss_list = []
+    val_loss_list = []
+    iteration_number = 500
 
-    # backward propagation
-    loss.backward()
+    for iteration in range(iteration_number):
+        # optimization
+        optimizer.zero_grad()
 
-    # Updating parameters
-    optimizer.step()
+        # Forward to get output
+        results = model.forward(inputs)
 
-    # store loss
-    loss_list.append(loss.data)
+        # Calculate Loss
+        loss = mse(results.squeeze(), targets)
 
-    val_results = model.forward(np_val_x)
-    val_loss = mse(val_results.squeeze(), np_val_y).data
-    val_loss_list.append(val_loss)
+        # backward propagation
+        loss.backward()
 
-test_results = model.forward(np_test_x).squeeze()
+        # Updating parameters
+        optimizer.step()
 
-with open('predictions.csv', "wt") as fp:
-    writer = csv.writer(fp, delimiter=",")
-    writer.writerow(["id", "cases"])
+        # store loss
+        loss_list.append(loss.data)
 
-    for count, result in enumerate(test_results):
-        writer.writerow([str(count), result.item()])
+        val_results = model.forward(torch_val_x)
+        val_loss = mse(val_results.squeeze(), torch_val_y).data
+        val_loss_list.append(val_loss)
 
-fig, axes = plt.subplots(nrows=1, ncols=2, figsize=(5, 3))
-axes[0].plot(range(iteration_number), loss_list)
-axes[1].plot(range(iteration_number), val_loss_list)
-fig.tight_layout()
-plt.show()
+    test_results = model.forward(np_test_x).squeeze()
+    print("Training Loss: {}".format(loss_list[-1]))
+    print("Validation Loss: {}".format(val_loss_list[-1]))
+
+    with open('predictions.csv', "wt") as fp:
+        writer = csv.writer(fp, delimiter=",")
+        writer.writerow(["id", "cases"])
+
+        for count, result in enumerate(test_results):
+            writer.writerow([str(count), result.item()])
+
+    fig, axes = plt.subplots(nrows=1, ncols=2, figsize=(5, 3))
+    axes[0].plot(range(iteration_number), loss_list)
+    axes[1].plot(range(iteration_number), val_loss_list)
+    fig.tight_layout()
+    plt.show()
+
+else:
+    from ridge_regression import RidgeModel
+    from sklearn.metrics import mean_squared_error
+
+    # Train Set
+    inputs = convert_to_tensor(x_train)
+    targets = torch.from_numpy(y_train)
+
+    # Val Set
+    torch_val_x = convert_to_tensor(x_val)
+    torch_val_y = torch.from_numpy(y_val)
+
+    # Test Set
+    np_test_x = convert_to_tensor(x_test)
+
+    ridge = RidgeModel(alpha=0.1)
+
+    ridge.fit(inputs, targets)
+
+    print("Ridge Regression Training Loss: ", mean_squared_error(ridge.predict(inputs), targets))
+    print("Ridge Regression Validation Loss: ", mean_squared_error(ridge.predict(torch_val_x), torch_val_y))

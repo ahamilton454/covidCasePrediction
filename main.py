@@ -6,9 +6,11 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import matplotlib.pyplot as plt
+import matplotlib
 import optuna
 from optuna.trial import TrialState
 import enum
+from sklearn.decomposition import PCA
 import csv
 
 
@@ -18,6 +20,7 @@ class Model(enum.Enum):
     NN = 2
     RidgeRegression = 3
     Visualize = 4
+    PCA = 5
 
 DEVICE = torch.device("cpu")
 FEATURE_COLMNS = ["Region", "Population", "Area", "Pop. Density", "Coastline", "Net migration",
@@ -25,7 +28,7 @@ FEATURE_COLMNS = ["Region", "Population", "Area", "Pop. Density", "Coastline", "
                                     "Birthrate", "Deathrate", "Agriculture", "Industry", "Service",
                                     "Handwashing Facilities", "Extreme poverty", "Median age", "Life expectancy",
                                     "Human development index"]
-TUNING = Model.NN
+TUNING = Model.PCA
 
 x_train, y_train, x_val, y_val, x_test = load_data()
 
@@ -137,7 +140,7 @@ elif TUNING == Model.NN:
     # train model
     loss_list = []
     val_loss_list = []
-    iteration_number = 600
+    iteration_number = 100
 
     for iteration in range(iteration_number):
         # optimization
@@ -197,6 +200,7 @@ elif TUNING == Model.RidgeRegression:
     print("Ridge Regression Training Loss: ", mean_squared_error(ridge.predict(inputs), targets))
     print("Ridge Regression Validation Loss: ", mean_squared_error(ridge.predict(torch_val_x), torch_val_y))
 elif TUNING == Model.Visualize:
+    df = pd.DataFrame(y_train, columns=["Cases"]).to_csv("y_train.csv")
 
     def remove_none(arr):
         for i in range(0, len(arr)):
@@ -207,7 +211,7 @@ elif TUNING == Model.Visualize:
         return arr
 
     arr_train = remove_none(np.array(x_train))
-    arr_val = remove_none(np.array(x_val))
+    arr_val = remove_none(np.array(x_test))
 
     fig, axes = plt.subplots(nrows=4, ncols=7)
     fig.tight_layout()
@@ -218,6 +222,51 @@ elif TUNING == Model.Visualize:
         plt.xlabel(i)
 
     plt.show()
+elif TUNING == Model.PCA:
+
+    pca = PCA(n_components=3)
+
+    principalComponents = pca.fit_transform(deep_interpolate_data(x_train).values)
+
+    print("PCA Variance Ratio: {}".format(pca.explained_variance_ratio_))
+    xdf = pd.DataFrame(principalComponents, columns=["principal component 1", "principal component 2", "principal component 3"])
+    xdf = xdf.fillna(xdf.mean())
+    ydf = pd.DataFrame(y_train, columns=['cases'])
+    finalDf = pd.concat([xdf, ydf], axis=1)
+
+    # Set Figure
+    fig, axs = plt.subplots(1, 3, figsize=(15, 5), sharey=False)
+    fig.tight_layout()
+
+
+    # Coloring Params
+    cmap = plt.cm.rainbow
+    norm = matplotlib.colors.Normalize(vmin=0, vmax=15)
+    sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+    fig.colorbar(sm)
+
+    # 1D Plot
+    axs[0].set_title('1 component PCA', fontsize=20)
+    axs[0].scatter(finalDf.loc[:, 'principal component 1'],
+               norm(finalDf.loc[:, "cases"]))
+
+    # 2D Plot
+    axs[1].set_title('2 component PCA', fontsize=20)
+    axs[1].scatter(finalDf.loc[:, 'principal component 1'],
+               finalDf.loc[:, 'principal component 2'],
+               c=cmap(norm(finalDf.loc[:, "cases"])))
+
+
+    # 3D Plot
+    axs[2] = fig.add_subplot(1, 3, 3, projection='3d')
+    axs[2].set_title('3 component PCA', fontsize=20)
+    axs[2].scatter(finalDf.loc[:, 'principal component 1'],
+               finalDf.loc[:, 'principal component 2'],
+               finalDf.loc[:, 'principal component 3'],
+               c=cmap(norm(finalDf.loc[:, "cases"])))
+
+    plt.show()
+
 
 
 

@@ -35,7 +35,7 @@ def convert_to_tensor(arr, drop=[], file_name=""):
 
 
 def define_model(num_features=23):
-    layers = [nn.Linear(num_features, 1)]
+    layers = [nn.Linear(num_features, num_features), nn.ReLU(), nn.Linear(num_features, 1)]
     return nn.Sequential(*layers)
 
 def write_predictions(test_results):

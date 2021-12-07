@@ -1,5 +1,5 @@
 from load_data import load_data
-from helpers import convert_to_tensor, define_model, write_predictions, deep_interpolate_data
+from helpers import convert_to_tensor, define_model, write_predictions, deep_interpolate_data, convert_to_tensor_pca, define_model_optuna
 import pandas as pd
 import numpy as np
 import torch
@@ -20,7 +20,7 @@ class Model(enum.Enum):
     NN = 2
     RidgeRegression = 3
     Visualize = 4
-    PCA = 5
+    RandomForestRegressor = 5
 
 DEVICE = torch.device("cpu")
 FEATURE_COLMNS = ["Region", "Population", "Area", "Pop. Density", "Coastline", "Net migration",
@@ -28,7 +28,7 @@ FEATURE_COLMNS = ["Region", "Population", "Area", "Pop. Density", "Coastline", "
                                     "Birthrate", "Deathrate", "Agriculture", "Industry", "Service",
                                     "Handwashing Facilities", "Extreme poverty", "Median age", "Life expectancy",
                                     "Human development index"]
-TUNING = Model.PCA
+TUNING = Model.RandomForestRegressor
 
 x_train, y_train, x_val, y_val, x_test = load_data()
 
@@ -53,8 +53,7 @@ def objective(trial):
     torch_val_x = convert_to_tensor(x_val, drop=drops)
     torch_val_y = torch.from_numpy(y_val)
 
-
-    model = define_model(num_features=inputs.shape[1]).to(DEVICE)
+    model = define_model_optuna(trial, num_features=inputs.shape[1]).to(DEVICE)
 
     optimizer_name = trial.suggest_categorical("optimizer", ["Adam", "RMSprop", "SGD"])
     lr = trial.suggest_float("lr", 1e-5, 1e-1, log=True)
@@ -65,6 +64,7 @@ def objective(trial):
     loss_list = []
     val_loss_list = []
     iteration_number = trial.suggest_int("iterations", 50, 1000)
+
 
     for iteration in range(iteration_number):
         # optimization
@@ -99,7 +99,7 @@ def objective(trial):
 if TUNING == Model.OptunaNN:
     if __name__ == "__main__":
         study = optuna.create_study(direction="minimize")
-        study.optimize(objective, n_trials=50, timeout=1000)
+        study.optimize(objective, n_trials=500, timeout=1000)
 
         pruned_trials = study.get_trials(deepcopy=False, states=[TrialState.PRUNED])
         complete_trials = study.get_trials(deepcopy=False, states=[TrialState.COMPLETE])
@@ -119,7 +119,7 @@ if TUNING == Model.OptunaNN:
             print("    {}: {}".format(key, value))
 elif TUNING == Model.NN:
 
-    drops = []
+    drops = ["Coastline", "Infant mortality"]
     # Train Set
     inputs = convert_to_tensor(x_train, drop=drops)
     targets = torch.from_numpy(y_train)
@@ -133,14 +133,14 @@ elif TUNING == Model.NN:
 
     model = define_model(inputs.shape[1]).to(DEVICE)
 
-    lr = 0.003
-    optimizer = getattr(optim, "Adam")(model.parameters(), lr=lr)
+    lr = 0.05
+    optimizer = getattr(optim, "RMSprop")(model.parameters(), lr=lr)
     mse = nn.MSELoss()
 
     # train model
     loss_list = []
     val_loss_list = []
-    iteration_number = 100
+    iteration_number = 750
 
     for iteration in range(iteration_number):
         # optimization
@@ -168,6 +168,7 @@ elif TUNING == Model.NN:
     test_results = model.forward(np_test_x).squeeze()
     print("Training Loss: {}".format(loss_list[-1]))
     print("Validation Loss: {}".format(val_loss_list[-1]))
+    print("Min Val Loss: ", min(val_loss_list))
 
     write_predictions(test_results)
 
@@ -222,51 +223,76 @@ elif TUNING == Model.Visualize:
         plt.xlabel(i)
 
     plt.show()
-elif TUNING == Model.PCA:
+elif TUNING == Model.RandomForestRegressor:
+    from sklearn.ensemble import RandomForestRegressor
+    from sklearn.metrics import mean_squared_error
 
-    pca = PCA(n_components=3)
+    # Load data
+    dfx = pd.DataFrame(x_train, columns=FEATURE_COLMNS)
+    dfxv = pd.DataFrame(x_val, columns=FEATURE_COLMNS)
+    dfxt = pd.DataFrame(x_test, columns=FEATURE_COLMNS)
 
-    principalComponents = pca.fit_transform(deep_interpolate_data(x_train).values)
+    # Normalize Data
+    dfx = (dfx - dfx.min()) / (dfx.max() - dfx.min())
+    dfxv = (dfxv - dfxv.min()) / (dfxv.max() - dfxv.min())
+    dfxt = (dfxt - dfxt.min()) / (dfxt.max() - dfxt.min())
 
-    print("PCA Variance Ratio: {}".format(pca.explained_variance_ratio_))
-    xdf = pd.DataFrame(principalComponents, columns=["principal component 1", "principal component 2", "principal component 3"])
-    xdf = xdf.fillna(xdf.mean())
-    ydf = pd.DataFrame(y_train, columns=['cases'])
-    finalDf = pd.concat([xdf, ydf], axis=1)
+    # Fill None Values
+    dfx = dfx.fillna(-1)
+    dfxv = dfxv.fillna(-1)
+    dfxt = dfxt.fillna(-1)
 
-    # Set Figure
-    fig, axs = plt.subplots(1, 3, figsize=(15, 5), sharey=False)
-    fig.tight_layout()
+    # Tree regressor
+    reg = RandomForestRegressor(n_estimators=50, max_depth=None, random_state=0)
+    reg.fit(dfx, y_train)
 
+    # Predictions on Val Set
+    predictions = reg.predict(dfxv)
 
-    # Coloring Params
-    cmap = plt.cm.rainbow
-    norm = matplotlib.colors.Normalize(vmin=0, vmax=15)
-    sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
-    fig.colorbar(sm)
+    print("Training Error: ", mean_squared_error(y_train, reg.predict(dfx)))
+    print("Validation Error: ", mean_squared_error(y_val, predictions))
 
-    # 1D Plot
-    axs[0].set_title('1 component PCA', fontsize=20)
-    axs[0].scatter(finalDf.loc[:, 'principal component 1'],
-               norm(finalDf.loc[:, "cases"]))
+    test_results = reg.predict(dfxt)
 
-    # 2D Plot
-    axs[1].set_title('2 component PCA', fontsize=20)
-    axs[1].scatter(finalDf.loc[:, 'principal component 1'],
-               finalDf.loc[:, 'principal component 2'],
-               c=cmap(norm(finalDf.loc[:, "cases"])))
+    write_predictions(test_results)
 
 
-    # 3D Plot
-    axs[2] = fig.add_subplot(1, 3, 3, projection='3d')
-    axs[2].set_title('3 component PCA', fontsize=20)
-    axs[2].scatter(finalDf.loc[:, 'principal component 1'],
-               finalDf.loc[:, 'principal component 2'],
-               finalDf.loc[:, 'principal component 3'],
-               c=cmap(norm(finalDf.loc[:, "cases"])))
 
-    plt.show()
-
+    # # Set Figure
+    # fig, axs = plt.subplots(1, 3, figsize=(15, 5), sharey=False)
+    # fig.tight_layout()
+    #
+    #
+    # # Coloring Params
+    # cmap = plt.cm.rainbow
+    # norm = matplotlib.colors.Normalize(vmin=0, vmax=15)
+    # sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
+    # fig.colorbar(sm)
+    #
+    # # 1D Plot
+    # axs[0].set_title('1 component PCA', fontsize=20)
+    # axs[0].scatter(finalDf.loc[:, 'principal component 1'],
+    #            norm(finalDf.loc[:, "cases"]))
+    #
+    # # 2D Plot
+    # axs[1].set_title('2 component PCA', fontsize=20)
+    # axs[1].scatter(finalDf.loc[:, 'principal component 1'],
+    #            finalDf.loc[:, 'principal component 2'],
+    #            c=cmap(norm(finalDf.loc[:, "cases"])))
+    #
+    #
+    # # 3D Plot
+    # axs[2] = fig.add_subplot(1, 3, 3, projection='3d')
+    # axs[2].set_title('3 component PCA', fontsize=20)
+    # axs[2].scatter(finalDf.loc[:, 'principal component 1'],
+    #            finalDf.loc[:, 'principal component 2'],
+    #            finalDf.loc[:, 'principal component 3'],
+    #            c=cmap(norm(finalDf.loc[:, "cases"])))
+    #
+    #
+    #
+    # plt.show()
+    #
 
 
 
